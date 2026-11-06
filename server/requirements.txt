@@ -1,0 +1,26 @@
+# Xavfsizlik: starlette >= 0.49.1 (CVE-2025-62727, Range sarlavhasi orqali CPU DoS)
+fastapi==0.142.2
+starlette==0.49.3
+uvicorn[standard]==0.34.0
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+redis==5.2.1
+httpx==0.28.1
+python-jose[cryptography]==3.5.0   # CVE-2024-33663/33664
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+
+cryptography==44.0.3   # OpenSSL CVE-2024-12797
+python-multipart==0.0.20
+
+# EZVIZ bulut kameralari (RTSP'siz) — pyezvizapi cloud oqimini tortadi,
+# pycryptodome shifrlangan (batareyali) kameralar NAL'ini dekodlaydi.
+pyezvizapi==1.0.5.0
+pycryptodome==3.21.0
+# Buzuq kadrlarni tashlash (drop_corrupt) — PyAV kadrlarni dekodlab faqat toza
+# (xatosiz) kadrlarni o'tkazadi; numpy rawvideo baytlari uchun.
+av==17.1.0
+numpy==2.2.1

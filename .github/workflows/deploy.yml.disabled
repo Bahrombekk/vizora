@@ -1,0 +1,54 @@
+# O'CHIRILGAN: fayl nomi `.disabled` bilan tugagani uchun GitHub uni
+# workflow sifatida ko'rmaydi. Sabab: server faqat ichki (private) tarmoqda —
+# GitHub runner'lar SSH orqali unga ulana olmaydi. Deploy qo'lda serverda
+# `bash deploy.sh` bilan bajariladi.
+# Qayta yoqish: faylni yana `deploy.yml` deb nomlang.
+name: Deploy
+# main ga push bo'lganda yoki qo'lda (Actions → Run workflow) ishga tushadi.
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - working-directory: server
+        run: pip install -r requirements-dev.txt && python -m pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Serverga SSH orqali deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ vars.SSH_HOST }}
+          username: ${{ vars.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ vars.SSH_PORT || 22 }}
+          # Docker build 10 daqiqadan uzoq — default command_timeout (10m)
+          # sessiyani paket yuklash o'rtasida uzib qo'yardi.
+          command_timeout: 40m
+          script: |
+            set -e
+            # DEPLOY_PATH o'rnatilmagan bo'lsa `cd` bo'sh argument bilan HOME'ga
+            # o'tib ketardi va deploy tushunarsiz xato bilan yiqilardi.
+            DEPLOY_PATH="${{ vars.DEPLOY_PATH }}"
+            if [ -z "$DEPLOY_PATH" ]; then
+              echo "XATO: DEPLOY_PATH repo variable o'rnatilmagan." >&2
+              exit 1
+            fi
+            cd "$DEPLOY_PATH"
+            # deploy.sh — yagona manba: git pull → build → MIGRATSIYA (app'dan
+            # OLDIN, crash-loop bo'lmasin) → up -d → tozalash. Ketma-ketlikni
+            # bu yerda takrorlamaymiz.
+            bash deploy.sh

@@ -1,0 +1,103 @@
+# MediaMTX sozlamasi — markaziy server uchun.
+# Kameralar RTSP'dan ON-DEMAND tortiladi (faqat tomoshabin bo'lganda).
+# Path'lar dinamik ravishda backend tomonidan Control API (9997) orqali qo'shiladi.
+
+logLevel: info
+logDestinations: [stdout]
+
+# Har bir o'quvchi/yozuvchi uchun yozish navbati. EZVIZ/Hik bulut oqimlari
+# TO'P-TO'P (bursty) keladi — standart 512 to'lib ketsa MediaMTX ulanishni
+# UZADI ("write queue is full") va tomoshabin qotib qoladi. Kattalashtiramiz.
+writeQueueSize: 2048
+
+# --- Autentifikatsiya (audit 2026-11-03) ---
+# Ilgari Docker tarmog'idagi HAR KIM parolsiz api/publish/read qila olardi. Shu
+# tarmoqda internetga ochiq isup-bridge (yopiq Hikvision SDK) turadi: u buzilsa,
+# API orqali path'ga `runOnDemand` yozib MediaMTX konteynerida buyruq bajarish,
+# istalgan kamera o'rniga soxta video qo'yish yoki hammasini ko'rish mumkin edi.
+#
+# Parollar BU FAYLDA EMAS — compose ularni env orqali beradi (MediaMTX
+# `MTX_AUTHINTERNALUSERS_<n>_PASS`). Env berilmasa quyidagi o'rinbosar qoladi va
+# hech kim ulanolmaydi (fail-closed). Tartib (indeks) muhim — compose shunga tayanadi.
+authInternalUsers:
+  # [0] MediaMTX'ning O'Z ichidagi runOnDemand/runOnInit ffmpeg'i — localhost'ga publish.
+  - user: any
+    pass:
+    ips: ['127.0.0.1/32', '::1/128']
+    permissions:
+      - action: publish
+
+  # [1] backend (app + EZVIZ publisher) — env MEDIAMTX_PASSWORD (.env).
+  - user: vzapp
+    pass: env-orqali-beriladi-MEDIAMTX_PASSWORD
+    permissions:
+      - action: api
+      - action: publish
+      - action: read
+      - action: playback
+
+  # [2] isup-bridge — FAQAT isup/ path'lariga publish (API yo'q, o'qish yo'q).
+  - user: vzisup
+    pass: env-orqali-beriladi-ISUP_MTX_PASSWORD
+    permissions:
+      - action: publish
+        path: ~^isup/
+
+# --- Control API (backend shu orqali path qo'shadi/o'chiradi) ---
+api: yes
+apiAddress: :9997
+
+# --- Protokollar ---
+rtsp: yes
+rtspAddress: :8554
+
+rtmp: yes
+rtmpAddress: :1935
+
+hls: yes
+hlsAddress: :8888
+# LL-HLS (Low-Latency HLS): segment YOPILISHINI kutmaydi — segment ichidagi
+# "part"lar (fMP4) tayyor bo'lgani sari uzatiladi. mpegts variantida pleyer 2-3
+# to'liq segment (~3-4s) buferlashi SHART edi; LL-HLS'da bir necha part (~0.6s)
+# yetadi. WebRTC'dan farqli: oddiy HTTP, qo'shimcha port kerak emas (nginx va
+# Cloudflare o'tkazadi). Pleyer tomonda `lowLatencyMode: true` kerak.
+hlsVariant: lowLatency
+# Part uzunligi — pleyer buferining eng kichik birligi. 200ms: kechikish kichik,
+# so'rov soni hali ham me'yorda (segment 1s = 5 part).
+hlsPartDuration: 200ms
+hlsAlwaysRemux: no
+# Segment davomiyligi KALIT KADR oralig'iga moslashadi (MediaMTX segmentni
+# keyingi keyframe'da kesadi). Publisher endi har 1s da kalit kadr chiqaradi
+# (EZVIZ_KEYFRAME_SECONDS) -> segmentlar ~1s -> pleyer 2 segment buferlab ~2s da
+# boshlaydi (2s segmentda ~4-5s kutardi). 7 segment = ~7s oyna: jitterga yetarli,
+# lekin muxer xotirasi va sovuq start yengil.
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+
+webrtc: yes
+webrtcAddress: :8889        # WHEP signalling (backend /whep proxy shu yerga uzatadi)
+# ICE (media) porti — BITTA UDP port, brauzerdan YETIB BORISHI kerak.
+webrtcLocalUDPAddress: :8189
+# Konteyner ichidagi interfeys IP'lari (172.x) brauzer uchun foydasiz, lekin
+# 127.0.0.1 nomzodi lokal deb ishlaydi (port hostga publish qilingan).
+webrtcIPsFromInterfaces: yes
+# PRODUCTION: serverning public IP yoki domenini shu yerga qo'shish SHART, aks
+# holda brauzer ulanadigan nomzod bo'lmaydi. Muhitdan berish qulayroq:
+#   MTX_WEBRTCADDITIONALHOSTS=1.2.3.4   (docker-compose'da .env orqali)
+# DIQQAT: Cloudflare proxy UDP'ni o'tkazmaydi — to'g'ridan-to'g'ri IP yoki
+# "grey cloud" (proxysiz) subdomen kerak, va UDP 8189 firewall'da ochilishi kerak.
+webrtcAdditionalHosts: []
+
+# --- Standart path sozlamalari (faqat timeoutlar; on-demand bayrog'i
+#     har bir path uchun backend API orqali alohida beriladi) ---
+pathDefaults:
+  sourceOnDemandStartTimeout: 15s
+  sourceOnDemandCloseAfter: 30s
+  runOnDemandStartTimeout: 15s
+  runOnDemandCloseAfter: 30s
+
+# Kamera path'lari runtime'da backend API orqali yaratiladi. Bittasi bundan mustasno:
+# isup-bridge `isup/<qurilma>/<kanal>[/sub]` ga publish qiladi — ilgari path'ni o'zi
+# API orqali yaratardi, endi bridge'da API huquqi yo'q (vzisup faqat publish).
+paths:
+  "~^isup/": {}

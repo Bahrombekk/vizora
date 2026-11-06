@@ -1,0 +1,54 @@
+# GPU (NVIDIA) transkod overlay'i — asosiy compose fayl bilan BIRGA ishlatiladi.
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d
+#   (dev uchun: -f docker-compose.yml -f docker-compose.gpu.yml)
+#
+# Talab: hostda NVIDIA drayver + `nvidia-container-toolkit` o'rnatilgan bo'lishi
+# (tekshirish: `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi`).
+#
+# Nima o'zgaradi: `app` konteyneri GPU'ni ko'radi -> `ffmpeg_hw.py` `h264_nvenc`
+# ni sinovdan o'tkazib GPU transkodga o'tadi (EZVIZ/Hik bulut kameralari).
+# CPU o'rniga GPU: bitta 1080p kamera ~0.4 yadro -> ~0 yadro; bir necha o'nlab
+# kamera bir vaqtda ochilsa ham CPU to'yinmaydi (oqim buzilmaydi).
+#
+# ESLATMA — NVENC sessiya limiti: GeForce kartalarda bir vaqtda 8 ta enkod
+# sessiyasi (drayverga qarab). Bizda har kamera 2 ta chiqish (HD+SD) yaratadi,
+# ya'ni ~4 kamera = 8 sessiya. Ko'proq kerak bo'lsa:
+#   a) ABR'ni o'chirib bitta rendition qoldirish (EZVIZ_SD_HEIGHT bilan), yoki
+#   b) Quadro/RTX professional karta, yoki
+#   c) tanilgan nvenc-patch (litsenziya masalasi — o'zingiz qaror qilasiz).
+# Limitga urilganda ffmpeg xato beradi va publisher jurnalida ko'rinadi
+# ("OpenEncodeSessionEx failed: out of memory") — o'sha holatda CPU'ga qaytmaydi,
+# shuning uchun kamera sonini bilib qo'yish kerak.
+
+services:
+  app:
+    environment:
+      FFMPEG_HWACCEL: ${FFMPEG_HWACCEL:-auto}
+      # ffmpeg NVENC/NVDEC kutubxonalarini hostdan oladi — `video` qobiliyati SHART.
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
+
+  # RTSP (simli) kameralarni transkod qilish MediaMTX konteynerida (runOnDemand)
+  # bo'ladi. Uning image'i (bluenviron/mediamtx:latest-ffmpeg) NVENC bilan
+  # kelmaydi — GPU kerak bo'lsa o'z image'ingizni qurish kerak. Shuning uchun bu
+  # yerda GPU BERILADI, lekin `MEDIAMTX_TRANSCODE_ENCODER` standart `libx264`
+  # qoladi; NVENC ishlaydigan mediamtx image'i bo'lsa `.env` da h264_nvenc qo'ying.
+  mediamtx:
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]

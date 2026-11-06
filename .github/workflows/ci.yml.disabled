@@ -1,0 +1,76 @@
+# O'CHIRILGAN: fayl nomi `.disabled` bilan tugagani uchun GitHub uni
+# workflow sifatida ko'rmaydi. Sabab: server faqat ichki (private) tarmoqda —
+# GitHub runner'lar unga ulana olmaydi.
+# Qayta yoqish: faylni yana `ci.yml` deb nomlang.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: O'rnatish
+        working-directory: server
+        run: pip install -r requirements-dev.txt
+      - name: Testlar (pytest)
+        working-directory: server
+        run: python -m pytest -q
+
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vizora
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/vizora
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: O'rnatish
+        working-directory: server
+        run: pip install -r requirements-dev.txt
+      - name: Migratsiya round-trip (upgrade -> downgrade -> upgrade)
+        working-directory: server
+        run: |
+          python -m alembic upgrade head
+          python -m alembic downgrade base
+          python -m alembic upgrade head
+      - name: Model<->migratsiya drift tekshiruvi
+        working-directory: server
+        run: python -m alembic check
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: panel/package-lock.json
+      - name: O'rnatish
+        working-directory: panel
+        run: npm ci
+      - name: Build
+        working-directory: panel
+        run: npm run build

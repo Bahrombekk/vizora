@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Env
+.env
+
+# Node / frontend
+node_modules/
+panel/dist/
+
+# Loglar
+*.log
+
+# Ildizdagi shaxsiy integratsiya nusxasi — ichida HAQIQIY API kalit bo'ladi.
+# Tarqatiladigan versiya docs/ da, kalitsiz.
+/vizora-integratsiya.md
+
+# Kamera eksport fayllari — ichida OCHIQ parollar va verify kodlar bo'ladi.
+/kameralar-*.csv
+/*.csv
+
+# Skrinshortlar (chat/diagnostika uchun, repoда kerak emas)
+/image*.png
+/image copy*.png
+
+# Hikvision ISUP SDK — litsenziya (MLA) bo'yicha tarqatib bo'lmaydi, har serverga
+# qo'lda qo'yiladi (isup/README.md). Faqat bo'sh papka belgisi repoda.
+/isup/sdk/*
+/isup/inc/*
+!/isup/sdk/.gitkeep
+!/isup/inc/.gitkeep
+/isup/logs/

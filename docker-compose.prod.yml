@@ -1,0 +1,223 @@
+# Production compose — alohida, standalone (dev docker-compose.yml ga tegmaydi).
+# Ishga tushirish:  docker compose -f docker-compose.prod.yml up -d --build
+# Migratsiya:       docker compose -f docker-compose.prod.yml exec -T app alembic upgrade head
+#
+# .env da REAL sirlar bo'lishi shart (JWT_SECRET, AES_KEY_HEX, ADMIN_PASSWORD, POSTGRES_PASSWORD).
+
+services:
+  postgres:
+    image: postgres:16.15-alpine   # aniq versiya — `16-alpine` jimgina yangilanardi
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD .env da bo'lishi shart}
+      POSTGRES_DB: ${POSTGRES_DB:-vizora}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.4.11-alpine
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mediamtx:
+    image: bluenviron/mediamtx:1.20.1-ffmpeg   # QADALGAN versiya — `latest` qo'yilmaydi:
+    # har rebuild'da jimgina yangi versiya tushib, HLS/WebRTC xatti-harakati
+    # o'zgarishi mumkin (1.20.1 da HLS sessiyasi cookie'dan query-param'ga o'tdi).
+    # 1.20.1 lokalda sinovdan o'tdi: LL-HLS ham, WHEP ham ishlaydi.
+    restart: always
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    expose:
+      - "8554"
+      - "1935"
+      - "8888"
+      - "8889"
+      - "9997"
+    # WebRTC MEDIA porti — brauzer to'g'ridan ulanadi (nginx orqali EMAS).
+    # Firewall'da ham ochilishi kerak: `ufw allow 8189/udp`.
+    ports:
+      - "${WEBRTC_UDP_PORT:-8189}:${WEBRTC_UDP_PORT:-8189}/udp"
+    environment:
+      # WebRTC ICE nomzodlari uchun PUBLIC manzil(lar). Busiz brauzer faqat
+      # konteyner IP'sini (172.x) ko'radi va ULANMAYDI. .env da:
+      #   WEBRTC_PUBLIC_HOSTS=<server public IP yoki proxysiz domen>
+      # DIQQAT: Cloudflare proxy UDP'ni o'tkazmaydi — to'g'ridan IP/grey-cloud kerak,
+      # va UDP 8189 firewall'da ochilishi shart. Bo'sh bo'lsa WebRTC ishlamaydi va
+      # pleyer jimgina HLS'ga qaytadi.
+      MTX_WEBRTCADDITIONALHOSTS: ${WEBRTC_PUBLIC_HOSTS:-}
+      # ICE (media) porti. Host'da 8189 band bo'lsa .env da WEBRTC_UDP_PORT=8289
+      # kabi o'zgartiring — nomzodlar ham shu portda e'lon qilinadi.
+      MTX_WEBRTCLOCALUDPADDRESS: ":${WEBRTC_UDP_PORT:-8189}"
+      # Ichki foydalanuvchilar paroli (mediamtx.yml authInternalUsers [1] vzapp, [2] vzisup).
+      MTX_AUTHINTERNALUSERS_1_PASS: ${MEDIAMTX_PASSWORD:?MEDIAMTX_PASSWORD .env da shart - openssl rand -hex 24}
+      MTX_AUTHINTERNALUSERS_2_PASS: ${ISUP_MTX_PASSWORD:?ISUP_MTX_PASSWORD .env da shart - openssl rand -hex 24}
+
+
+  app:
+    build: ./server
+    restart: always
+    # Dockerfile CMD ishlatiladi (uvicorn, --reload YO'Q). Host volume YO'Q.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: &app_env
+      APP_ROLE: api   # video `media` xizmatida
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vizora}
+      REDIS_URL: redis://redis:6379/0
+      MEDIAMTX_API_URL: http://mediamtx:9997
+      MEDIAMTX_HLS_URL: http://mediamtx:8888
+      MEDIAMTX_WEBRTC_URL: http://mediamtx:8889
+      MEDIAMTX_RTSP_HOST: mediamtx
+      MEDIAMTX_PASSWORD: ${MEDIAMTX_PASSWORD:?MEDIAMTX_PASSWORD .env da shart - openssl rand -hex 24}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET .env da bo'lishi shart}
+      AES_KEY_HEX: ${AES_KEY_HEX:?AES_KEY_HEX .env da bo'lishi shart}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD .env da bo'lishi shart}
+      ENVIRONMENT: production
+      # Proksi zanjiri: openresty (<PUBLIC_IP>) -> host nginx -> web konteyner.
+      # Shu son bo'lmasa login rate-limit hamma foydalanuvchini bitta IP deb
+      # hisoblaydi (10 urinish / 5 daqiqa — hammaga birga).
+      # MAJBURIY (audit 2026-11-03): ilgari berilmasa jimgina 0 bo'lardi. DEPLOY.md §3: 3.
+      TRUSTED_PROXY_COUNT: ${TRUSTED_PROXY_COUNT:?TRUSTED_PROXY_COUNT .env da shart - DEPLOY.md 3-bo'lim}
+      # Oldindan isitish — so'nggi ko'rilgan HIK_WARM_MAX_CAMERAS ta kamera issiq
+      # turadi (bir zumda ochiladi), qolganlari on-demand (~14s). Standart: o'chiq.
+      HIK_KEEP_WARM: ${HIK_KEEP_WARM:-false}
+      HIK_WARM_MAX_CAMERAS: ${HIK_WARM_MAX_CAMERAS:-12}
+      # DOIM TAYYOR kameralar. Qiymatsiz — .env da berilsa uzatiladi, berilmasa
+      # config.py dagi standart ro'yxat ishlaydi.
+      ALWAYS_WARM_CAMERA_IDS:
+      # --- Transkod (GPU/CPU) va bulut oqim sifati ---
+      # Qiymatsiz yozilgan: .env da berilsa uzatiladi, berilmasa UMUMAN
+      # qo'yilmaydi (config.py dagi standart ishlaydi).
+      FFMPEG_HWACCEL:
+      FFMPEG_X264_PRESET:
+      NVENC_SD_ON_CPU:
+      MEDIAMTX_TRANSCODE_ENCODER:
+      EZVIZ_HD_BITRATE_KBPS:
+      EZVIZ_SD_BITRATE_KBPS:
+      EZVIZ_KEYFRAME_SECONDS:
+      EZVIZ_OUTPUT_FPS:
+      EZVIZ_HD_MAX_HEIGHT:
+      EZVIZ_SD_HEIGHT:
+      EZVIZ_WRITE_BUFFER_BYTES:
+      # --- ISUP 5.0 (isup-bridge, profil "isup") ---
+      ISUP_BRIDGE_URL: ${ISUP_BRIDGE_URL:-http://isup-bridge:8091}
+      ISUP_BRIDGE_TOKEN: ${ISUP_BRIDGE_TOKEN:-}
+      ISUP_PUBLIC_HOST: ${ISUP_PUBLIC_IP:-}
+      ISUP_CMS_PORT: ${ISUP_CMS_PORT:-17660}
+      ISUP_SUBSTREAM:
+      ISUP_MAIN_IDLE_SECONDS:
+      ISUP_DEFAULT_KEY: ${ISUP_KEY:-}
+      ISUP_ALLOW_DEFAULT_KEY:
+      # --- Holat probe va kamera ochilishi ---
+      # Qiymatsiz: .env da berilsa uzatiladi, berilmasa config.py standarti ishlaydi.
+      # (Avval bular .env.example da bor edi-yu, konteynerga UMUMAN yetmasdi.)
+      PROBE_INTERVAL_SECONDS:
+      OFFLINE_AFTER_SECONDS:
+      EZVIZ_STATUS_INTERVAL_SECONDS:
+      EZVIZ_VTM_CACHE_SECONDS:
+      EZVIZ_FAULT_RECHECK_SECONDS:
+      EZVIZ_IDLE_SECONDS:
+      HIK_IDLE_SECONDS:
+      EZVIZ_TRANSCODE_IDLE_SECONDS:
+      WS_STREAM_IDLE_SECONDS:
+    volumes:
+      # EZVIZ ish papkasi DOIMIY: snapshot rasmlari (qora ekran o'rniga oxirgi
+      # kadr), bulut sessiya tokenlari, VTM keshi va ffmpeg-hw keshi shu yerda.
+      # Volume bo'lmasa har deploy'da hammasi yo'qolib, birinchi ochilish sekin
+      # bo'lardi va grid'da qora kvadratlar chiqardi.
+      - ezvizdata:/tmp/vizora-ezviz
+    expose:
+      - "8000"   # faqat ichki tarmoq — tashqariga Nginx (web) chiqaradi
+    # /health DB + Redis ulanishini tekshiradi. Image'da curl yo'q — python urllib.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s   # lifespan (admin yaratish + MediaMTX path sync) uchun vaqt
+
+  # Video jarayoni: /ws/stream, /hls, /whep (web nginx shu yerga yo'naltiradi).
+  # API bilan bitta event loop'da ko'p tomoshabinda panel osilib qolardi
+  # (o'lchandi: 40 tomoshabinda oddiy so'rov 5-12 s). Image va sozlamalar `app` niki,
+  # faqat APP_ROLE=media: fon vazifalari yo'q, API bilan Redis signallari orqali.
+  media:
+    build: ./server
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *app_env
+      APP_ROLE: media
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ISUP 5.0 ko'prik (isup/README.md). SDK repoda yo'q — profil ortida:
+  # .env da COMPOSE_PROFILES=isup, ISUP_KEY, ISUP_PUBLIC_IP. Tashqi firewall
+  # (Kerio MAP) da 17660 tcp+udp va 17661 tcp ochiq bo'lishi shart.
+  isup-bridge:
+    build: ./isup
+    profiles: ["isup"]
+    restart: always
+    depends_on:
+      - mediamtx
+    environment:
+      ISUP_KEY: ${ISUP_KEY:-}
+      PUBLIC_IP: ${ISUP_PUBLIC_IP:-}
+      CMS_PORT: ${ISUP_CMS_PORT:-17660}
+      STREAM_PORT: ${ISUP_STREAM_PORT:-17661}
+      API_PORT: "8091"
+      API_TOKEN: ${ISUP_BRIDGE_TOKEN:-}
+      # vzisup: MediaMTX'da faqat isup/ ga publish (API va o'qish yo'q).
+      RTSP_BASE: rtsp://vzisup:${ISUP_MTX_PASSWORD:?ISUP_MTX_PASSWORD .env da shart - openssl rand -hex 24}@mediamtx:8554
+      MTX_API: ""   # path mediamtx.yml dagi ~^isup/ dan; bridge API'ga kirmaydi
+      SDK_LOG_LEVEL: ${ISUP_SDK_LOG_LEVEL:-2}
+      # 0 = moslik (hozirgi), 2 = xavfsiz (faqat himoyalangan 4.0+ protokol) — bridge.cpp
+      ACCESS_SECURITY: ${ISUP_ACCESS_SECURITY:-0}
+    ports:
+      - "${ISUP_CMS_PORT:-17660}:${ISUP_CMS_PORT:-17660}/tcp"
+      - "${ISUP_CMS_PORT:-17660}:${ISUP_CMS_PORT:-17660}/udp"
+      - "${ISUP_STREAM_PORT:-17661}:${ISUP_STREAM_PORT:-17661}/tcp"
+    expose:
+      - "8091"
+    volumes:
+      - isuplogs:/opt/isup/logs
+
+  web:
+    build: ./panel
+    restart: always
+    depends_on:
+      app:
+        condition: service_healthy
+      media:
+        condition: service_healthy
+    # TLS host nginx'da tugatiladi (vizora.example.com). Konteyner faqat
+    # localhost'ga ochiladi — host nginx shu portga proxy qiladi (public emas).
+    ports:
+      - "127.0.0.1:8095:80"
+
+volumes:
+  pgdata:
+  ezvizdata:
+  isuplogs:
