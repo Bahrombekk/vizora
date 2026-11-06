@@ -212,10 +212,12 @@ services:
         condition: service_healthy
       media:
         condition: service_healthy
-    # TLS host nginx'da tugatiladi (vizora.example.com). Konteyner faqat
-    # localhost'ga ochiladi — host nginx shu portga proxy qiladi (public emas).
+    # TLS reverse-proxy'da tugatiladi (host nginx yoki tarmoqdagi Nginx Proxy Manager).
+    # Standart: faqat localhost. Proxy BOSHQA mashinada bo'lsa .env'da
+    # WEB_BIND=<shu serverning LAN IP'si> qo'ying va firewall'da 8095 ni faqat
+    # proxy IP'siga oching.
     ports:
-      - "127.0.0.1:8095:80"
+      - "${WEB_BIND:-127.0.0.1}:8095:80"
 
 volumes:
   pgdata:
