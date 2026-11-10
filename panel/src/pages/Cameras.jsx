@@ -15,8 +15,60 @@ import {
 } from "../components/icons.jsx";
 
 const PAGE = 24;
+
+// --- RTSP manzilini maydonlardan yig'ish ---
+// Operator rtsp://... ni qo'lda yozmaydi: IP, port, login, parol va kanalni kiritadi,
+// URL esa brend shabloni bo'yicha shu yerda quriladi. Login/parol URL-kodlanadi
+// (backend check_rtsp_url `$ \ " '` va bo'sh joyni rad etadi; `@ : /` esa URL'ni buzadi).
+// "To'liq URL" rejimi nostandart kameralar uchun saqlanib qoladi.
+const RTSP_BRANDS = {
+  hikvision: {
+    label: "Hikvision / HiWatch",
+    main: (ch) => `/Streaming/Channels/${ch}01`,
+    sub: (ch) => `/Streaming/Channels/${ch}02`,
+  },
+  dahua: {
+    label: "Dahua / Imou",
+    main: (ch) => `/cam/realmonitor?channel=${ch}&subtype=0`,
+    sub: (ch) => `/cam/realmonitor?channel=${ch}&subtype=1`,
+  },
+  generic: { label: "Boshqa (yo'lni o'zim yozaman)" },
+};
+
+// encodeURIComponent `'` ni kodlamaydi, backend esa uni rad etadi — shuni qo'shimcha kodlaymiz.
+const encCred = (s) => encodeURIComponent(s).replace(/'/g, "%27");
+const normPath = (p) => { const t = (p || "").trim(); return !t ? "" : t.startsWith("/") ? t : "/" + t; };
+
+/** {main, sub, error} — oddiy rejimda maydonlardan, URL rejimida qo'lda yozilganidan. */
+function rtspUrls(form, { mask = false } = {}) {
+  if (form.conn_mode === "url") return { main: form.rtsp_url.trim(), sub: form.rtsp_sub_url.trim(), error: null };
+  const host = (form.rtsp_host || "").trim();
+  if (!host) return { main: "", sub: "", error: null };
+  if (!/^[A-Za-z0-9.\-]+$/.test(host)) return { main: "", sub: "", error: "IP manzil noto'g'ri (masalan 192.168.1.64)" };
+  const port = String(form.rtsp_port || "554").trim();
+  if (!/^\d{1,5}$/.test(port) || +port < 1 || +port > 65535) return { main: "", sub: "", error: "Port 1–65535 oralig'ida bo'lsin" };
+  const ch = Math.max(1, parseInt(form.rtsp_channel, 10) || 1);
+  const user = (form.rtsp_user || "").trim();
+  const pass = form.rtsp_pass || "";
+  const cred = user ? `${encCred(user)}${pass ? ":" + (mask ? "•••" : encCred(pass)) : ""}@` : "";
+  const base = `rtsp://${cred}${host}:${port}`;
+  const brand = RTSP_BRANDS[form.rtsp_brand] || RTSP_BRANDS.hikvision;
+  const mainPath = brand.main ? brand.main(ch) : normPath(form.rtsp_path) || "/";
+  const subPath = brand.sub ? brand.sub(ch) : normPath(form.rtsp_sub_path);
+  return {
+    main: base + mainPath,
+    sub: form.rtsp_with_sub && subPath ? base + subPath : "",
+    error: null,
+  };
+}
+
+const RTSP_FIELDS = {
+  conn_mode: "simple", rtsp_brand: "hikvision", rtsp_host: "", rtsp_port: "554", rtsp_user: "admin",
+  rtsp_pass: "", rtsp_channel: 1, rtsp_path: "", rtsp_sub_path: "", rtsp_with_sub: true,
+};
+
 const empty = {
-  source_type: "rtsp", name: "", zone_id: "", rtsp_url: "", rtsp_sub_url: "",
+  source_type: "rtsp", name: "", zone_id: "", rtsp_url: "", rtsp_sub_url: "", ...RTSP_FIELDS,
   ezviz_account_id: "", ezviz_serial: "", ezviz_channel: 1, ezviz_verify_code: "", ezviz_drop_corrupt: false, ezviz_use_substream: false,
   isup_device_id: "", isup_channel: 1,
   codec: "auto", transcode: false, enabled: true, keep_warm: false,
@@ -184,10 +236,12 @@ export default function Cameras() {
           if (form.clear_code) payload.ezviz_verify_code = "";
           else if (form.ezviz_verify_code) payload.ezviz_verify_code = form.ezviz_verify_code;
         } else {
+          const u = rtspUrls(form);
+          if (u.error) throw new Error(u.error);
           payload.codec = form.codec; payload.transcode = form.transcode;
-          if (form.rtsp_url) payload.rtsp_url = form.rtsp_url;
+          if (u.main) payload.rtsp_url = u.main;
           if (form.clear_sub) payload.rtsp_sub_url = "";
-          else if (form.rtsp_sub_url) payload.rtsp_sub_url = form.rtsp_sub_url;
+          else if (u.sub) payload.rtsp_sub_url = u.sub;
         }
         await apiFetch(`/cameras/${form.id}`, { method: "PATCH", json: payload });
       } else {
@@ -210,10 +264,12 @@ export default function Cameras() {
             ezviz_use_substream: !!form.ezviz_use_substream, enabled: form.enabled,
           };
         } else {
-          if (!form.rtsp_url) throw new Error("RTSP URL kiriting");
+          const u = rtspUrls(form);
+          if (u.error) throw new Error(u.error);
+          if (!u.main) throw new Error(form.conn_mode === "url" ? "RTSP URL kiriting" : "Kameraning IP manzilini kiriting");
           payload = {
-            name: form.name, zone_id: fac, source_type: "rtsp", rtsp_url: form.rtsp_url,
-            rtsp_sub_url: form.rtsp_sub_url || null, codec: form.codec,
+            name: form.name, zone_id: fac, source_type: "rtsp", rtsp_url: u.main,
+            rtsp_sub_url: u.sub || null, codec: form.codec,
             transcode: form.transcode, enabled: form.enabled,
           };
         }
@@ -251,7 +307,7 @@ export default function Cameras() {
   const openEdit = (c) => {
     setForm({
       id: c.id, source_type: c.source_type || "rtsp", zone_id: c.zone_id || "", name: c.name,
-      rtsp_url: "", rtsp_sub_url: "", has_sub: c.has_sub, clear_sub: false,
+      rtsp_url: "", rtsp_sub_url: "", has_sub: c.has_sub, clear_sub: false, ...RTSP_FIELDS,
       ezviz_account_id: c.ezviz_account_id || "", ezviz_serial: c.ezviz_serial || "", ezviz_channel: c.ezviz_channel || 1,
       ezviz_verify_code: "", has_verify_code: c.has_verify_code, clear_code: false,
       ezviz_drop_corrupt: !!c.ezviz_drop_corrupt, ezviz_use_substream: !!c.ezviz_use_substream,
@@ -457,17 +513,25 @@ function CameraForm({ form, setForm, zones, accounts, busy, formError, onSave, o
   const footHint = nameMissing ? "Nom majburiy"
     : isEz ? (form.ezviz_serial ? `${form.ezviz_serial} · CH${form.ezviz_channel || 1}` : "Qurilmani tanlang")
     : isIsup ? (form.isup_device_id ? `ISUP ${form.isup_device_id} · CH${form.isup_channel || 1}` : "Device ID kiriting")
-    : (form.rtsp_url || form.id ? "" : "RTSP URL kiriting");
+    : (rtspUrls(form).main || form.id ? "" : form.conn_mode === "url" ? "RTSP URL kiriting" : "IP manzil kiriting");
+
+  const urls = isRtsp ? rtspUrls(form) : { main: "", sub: "", error: null };
+  const preview = isRtsp && form.conn_mode !== "url" ? rtspUrls(form, { mask: true }) : null;
+  const brand = RTSP_BRANDS[form.rtsp_brand] || RTSP_BRANDS.hikvision;
+  const setConn = (patch) => { set(patch); setTestResult(null); };
 
   async function testRtsp() {
-    if (!form.rtsp_url) { setTestResult({ ok: false, msg: "Avval RTSP URL kiriting" }); return; }
+    if (urls.error) { setTestResult({ ok: false, msg: urls.error }); return; }
+    if (!urls.main) { setTestResult({ ok: false, msg: form.conn_mode === "url" ? "Avval RTSP URL kiriting" : "Avval IP manzilni kiriting" }); return; }
     setTesting(true); setTestResult(null);
     try {
-      const r = await apiFetch("/cameras/test", { method: "POST", json: { rtsp_url: form.rtsp_url } });
+      const r = await apiFetch("/cameras/test", { method: "POST", json: { rtsp_url: urls.main } });
       if (r.ok) {
         setTestResult({ ok: true, msg: `Ulandi · ${String(r.codec || "?").toUpperCase()} · ${r.width}×${r.height}${r.codec === "h265" ? " · brauzer uchun H.264 ga o'giriladi" : ""}` });
         set({ codec: r.codec || form.codec, transcode: r.codec === "h265" ? true : form.transcode });
-      } else setTestResult({ ok: false, msg: "Ulanib bo'lmadi — URL, login/parol yoki tarmoqni tekshiring" });
+      } else setTestResult({ ok: false, msg: form.conn_mode === "url"
+        ? "Ulanib bo'lmadi — URL, login/parol yoki tarmoqni tekshiring"
+        : "Ulanib bo'lmadi — IP, login/parol, kanal yoki tarmoqni tekshiring" });
     } catch (e) { setTestResult({ ok: false, msg: e.message }); } finally { setTesting(false); }
   }
 
@@ -525,29 +589,108 @@ function CameraForm({ form, setForm, zones, accounts, busy, formError, onSave, o
       </Section>
 
       {isRtsp && (
-        <Section n="2" title="Ulanish (RTSP)" sub={form.id ? "Bo'sh qoldirilsa — saqlangan URL o'zgarmaydi" : "Login va parol URL ichida, shifrlangan holda saqlanadi"}>
-          <div className="field">
-            <label className="label">Asosiy oqim URL</label>
-            <div className="cf-url">
-              <input className="input" type={showUrl ? "text" : "password"} autoComplete="off" spellCheck={false} value={form.rtsp_url}
-                placeholder={form.id ? "(o'zgartirmaslik uchun bo'sh qoldiring)" : "rtsp://user:parol@10.0.0.5:554/Streaming/Channels/101"}
-                onChange={(e) => { set({ rtsp_url: e.target.value }); setTestResult(null); }} />
-              <button type="button" className="btn-sq" title={showUrl ? "Yashirish" : "Ko'rsatish"} onClick={() => setShowUrl((v) => !v)}>{showUrl ? <IcEyeOff size={15} /> : <IcEye size={15} />}</button>
-              <button type="button" className="btn soft" onClick={testRtsp} disabled={testing || !form.rtsp_url}>{testing ? "Sinalmoqda…" : "Sinash"}</button>
+        <Section n="2" title="Ulanish (RTSP)" sub={form.id
+          ? "Bo'sh qoldirilsa — saqlangan ulanish o'zgarmaydi"
+          : "Login va parol shifrlangan holda saqlanadi"}>
+          <div className="seg cf-seg cf-mode">
+            <button type="button" className={form.conn_mode !== "url" ? "on" : ""} onClick={() => setConn({ conn_mode: "simple" })}>IP · login · parol</button>
+            <button type="button" className={form.conn_mode === "url" ? "on" : ""} onClick={() => setConn({ conn_mode: "url" })}>To'liq RTSP URL</button>
+          </div>
+
+          {form.conn_mode !== "url" ? (<>
+            <div className="cf-grid">
+              <div className="field">
+                <label className="label">Kamera turi</label>
+                <select className="select" value={form.rtsp_brand} onChange={(e) => setConn({ rtsp_brand: e.target.value })}>
+                  {Object.entries(RTSP_BRANDS).map(([k, b]) => <option key={k} value={k}>{b.label}</option>)}
+                </select>
+              </div>
+              <div className="cf-grid cf-ipport">
+                <div className="field">
+                  <label className="label">IP manzil</label>
+                  <input className="input mono" inputMode="decimal" autoComplete="off" spellCheck={false} value={form.rtsp_host}
+                    placeholder={form.id ? "(o'zgartirmaslik uchun bo'sh)" : "192.168.1.64"}
+                    onChange={(e) => setConn({ rtsp_host: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label className="label">Port</label>
+                  <input className="input mono" inputMode="numeric" value={form.rtsp_port} placeholder="554"
+                    onChange={(e) => setConn({ rtsp_port: e.target.value.replace(/\D/g, "").slice(0, 5) })} />
+                </div>
+              </div>
             </div>
-            {testResult && <div className={`cf-test ${testResult.ok ? "ok" : "bad"}`}>{testResult.ok ? <IcCheck size={14} /> : <IcCameraOff size={14} />}{testResult.msg}</div>}
-          </div>
-          <div className="field">
-            <label className="label">
-              Sub-stream URL <span className="opt">ixtiyoriy · past sifat, devor va sekin tarmoq uchun</span>
-              {form.id && form.has_sub && !form.clear_sub && <span className="saved"> · sozlangan</span>}
-            </label>
-            <input className="input" type={showUrl ? "text" : "password"} autoComplete="off" value={form.rtsp_sub_url} placeholder="rtsp://user:parol@10.0.0.5:554/Streaming/Channels/102" disabled={form.clear_sub}
-              onChange={(e) => set({ rtsp_sub_url: e.target.value })} />
-            {form.id && form.has_sub && (
-              <label className="cf-check"><input type="checkbox" checked={form.clear_sub} onChange={(e) => set({ clear_sub: e.target.checked })} />Sub-stream'ni o'chirish</label>
+            <div className="cf-grid">
+              <div className="field">
+                <label className="label">Login</label>
+                <input className="input" autoComplete="off" spellCheck={false} value={form.rtsp_user} placeholder="admin"
+                  onChange={(e) => setConn({ rtsp_user: e.target.value })} />
+              </div>
+              <div className="field">
+                <label className="label">Parol</label>
+                <div className="cf-url">
+                  <input className="input" type={showUrl ? "text" : "password"} autoComplete="new-password" spellCheck={false} value={form.rtsp_pass}
+                    onChange={(e) => setConn({ rtsp_pass: e.target.value })} />
+                  <button type="button" className="btn-sq" title={showUrl ? "Yashirish" : "Ko'rsatish"} onClick={() => setShowUrl((v) => !v)}>{showUrl ? <IcEyeOff size={15} /> : <IcEye size={15} />}</button>
+                </div>
+              </div>
+            </div>
+            {brand.main ? (
+              <div className="field cf-ch">
+                <label className="label">Kanal <span className="opt">kamera — 1, NVR'da kamera raqami</span></label>
+                <input className="input mono" inputMode="numeric" value={form.rtsp_channel}
+                  onChange={(e) => setConn({ rtsp_channel: e.target.value.replace(/\D/g, "").slice(0, 3) })} />
+              </div>
+            ) : (
+              <div className="cf-grid">
+                <div className="field">
+                  <label className="label">Oqim yo'li</label>
+                  <input className="input mono" spellCheck={false} value={form.rtsp_path} placeholder="/stream1"
+                    onChange={(e) => setConn({ rtsp_path: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label className="label">Sub-stream yo'li <span className="opt">ixtiyoriy</span></label>
+                  <input className="input mono" spellCheck={false} value={form.rtsp_sub_path} placeholder="/stream2"
+                    onChange={(e) => setConn({ rtsp_sub_path: e.target.value })} />
+                </div>
+              </div>
             )}
-          </div>
+            <label className="cf-check">
+              <input type="checkbox" checked={!!form.rtsp_with_sub} disabled={form.clear_sub} onChange={(e) => setConn({ rtsp_with_sub: e.target.checked })} />
+              Sub-stream ham qo'shilsin — past sifat, devor va sekin tarmoq uchun
+              {form.id && form.has_sub && !form.clear_sub && <span className="saved"> · hozir sozlangan</span>}
+            </label>
+            <div className="cf-test-row">
+              <div className="cf-preview mono" title="Shu manzil saqlanadi">
+                {urls.error ? <span className="bad">{urls.error}</span>
+                  : preview?.main ? preview.main
+                  : <span className="faint">IP manzil kiritilgach, ulanish manzili shu yerda ko'rinadi</span>}
+              </div>
+              <button type="button" className="btn soft" onClick={testRtsp} disabled={testing || !urls.main || !!urls.error}>{testing ? "Sinalmoqda…" : "Sinash"}</button>
+            </div>
+          </>) : (<>
+            <div className="field">
+              <label className="label">Asosiy oqim URL</label>
+              <div className="cf-url">
+                <input className="input" type={showUrl ? "text" : "password"} autoComplete="off" spellCheck={false} value={form.rtsp_url}
+                  placeholder={form.id ? "(o'zgartirmaslik uchun bo'sh qoldiring)" : "rtsp://user:parol@10.0.0.5:554/Streaming/Channels/101"}
+                  onChange={(e) => setConn({ rtsp_url: e.target.value })} />
+                <button type="button" className="btn-sq" title={showUrl ? "Yashirish" : "Ko'rsatish"} onClick={() => setShowUrl((v) => !v)}>{showUrl ? <IcEyeOff size={15} /> : <IcEye size={15} />}</button>
+                <button type="button" className="btn soft" onClick={testRtsp} disabled={testing || !form.rtsp_url}>{testing ? "Sinalmoqda…" : "Sinash"}</button>
+              </div>
+            </div>
+            <div className="field">
+              <label className="label">
+                Sub-stream URL <span className="opt">ixtiyoriy · past sifat, devor va sekin tarmoq uchun</span>
+                {form.id && form.has_sub && !form.clear_sub && <span className="saved"> · sozlangan</span>}
+              </label>
+              <input className="input" type={showUrl ? "text" : "password"} autoComplete="off" value={form.rtsp_sub_url} placeholder="rtsp://user:parol@10.0.0.5:554/Streaming/Channels/102" disabled={form.clear_sub}
+                onChange={(e) => set({ rtsp_sub_url: e.target.value })} />
+            </div>
+          </>)}
+          {testResult && <div className={`cf-test ${testResult.ok ? "ok" : "bad"}`}>{testResult.ok ? <IcCheck size={14} /> : <IcCameraOff size={14} />}{testResult.msg}</div>}
+          {form.id && form.has_sub && (
+            <label className="cf-check"><input type="checkbox" checked={form.clear_sub} onChange={(e) => set({ clear_sub: e.target.checked })} />Sub-stream'ni o'chirish</label>
+          )}
           <div className="cf-grid">
             <div className="field">
               <label className="label">Kodek</label>
