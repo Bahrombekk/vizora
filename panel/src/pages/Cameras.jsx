@@ -635,8 +635,8 @@ function CameraForm({ form, setForm, zones, accounts, busy, formError, onSave, o
               </div>
             </div>
             {brand.main ? (
-              <div className="field cf-ch">
-                <label className="label">Kanal <span className="opt">kamera — 1, NVR'da kamera raqami</span></label>
+              <div className="field cf-chan">
+                <label className="label">Kanal <span className="opt">NVR'da — kamera raqami</span></label>
                 <input className="input mono" inputMode="numeric" value={form.rtsp_channel}
                   onChange={(e) => setConn({ rtsp_channel: e.target.value.replace(/\D/g, "").slice(0, 3) })} />
               </div>
